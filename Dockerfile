@@ -2,12 +2,17 @@ FROM golang:1.25
 
 ENV GOPATH=/
 
+ARG TARGETARCH
+ARG MIGRATE_VERSION=v4.19.1
+
 COPY ./ ./
 
-RUN apt-get update
-RUN apt-get -y install postgresql-client
-RUN curl -L https://github.com/golang-migrate/migrate/releases/download/v4.14.1/migrate.linux-amd64.tar.gz | tar xvz
-RUN mv migrate.linux-amd64 $GOPATH/bin/migrate
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL "https://github.com/golang-migrate/migrate/releases/download/${MIGRATE_VERSION}/migrate.linux-${TARGETARCH}.tar.gz" \
+    | tar xz -C /usr/local/bin migrate
 
 RUN go mod download
 RUN go build -o app ./cmd/main.go
