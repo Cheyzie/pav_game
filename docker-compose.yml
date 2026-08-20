@@ -1,0 +1,37 @@
+version: '3.7'
+
+services:
+  app:
+    build: ./
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        migrate -source file://database/migrations -database postgres://${DB_USERNAME}:${DB_PASSWORD}@db:5432/${DB_DATABASE}?sslmode=disable up
+        ./app
+    ports:
+      - ${APP_PORT}:${APP_PORT}
+    depends_on:
+      - db
+    restart: always
+  db:
+    image: postgres:18
+    volumes:
+      - sqldata:/var/lib/postgresql
+    environment:
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_USER=${DB_USERNAME}
+      - POSTGRES_DB=${DB_DATABASE}
+    ports:
+      - 5434:5432
+    expose:
+      - 5432
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: always
+
+volumes:
+  sqldata:
