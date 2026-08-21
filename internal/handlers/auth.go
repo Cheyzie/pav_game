@@ -78,7 +78,7 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newResponse(w, http.StatusOK, map[string]any{
+	newResponse(w, http.StatusCreated, map[string]any{
 		"id": id,
 	})
 }

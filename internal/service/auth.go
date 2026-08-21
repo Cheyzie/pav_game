@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Cheyzie/pav_game/internal/dtos"
@@ -56,12 +57,13 @@ func NewAuthorizationService(repo UserRepository, rtRepo RefreshTokenRepository)
 
 func (s *AuthorizationService) CreateUser(user model.User) (uint, error) {
 	user.Password = s.generatePasswordHahs(user.Password)
+	user.Email = strings.ToLower(user.Email)
 	return s.repo.Create(user)
 }
 
 func (s *AuthorizationService) GenerateToken(email, password, sessionName, ipAddress string) (dtos.Token, error) {
 
-	user, err := s.repo.GetByCredentials(email, s.generatePasswordHahs(password))
+	user, err := s.repo.GetByCredentials(strings.ToLower(email), s.generatePasswordHahs(password))
 	if err != nil {
 		return dtos.Token{}, err
 	}

@@ -239,7 +239,7 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 					}
 					room.Timers[model.ResultState] = nil
 					room.Answers = nil
-					room.PhaseEndsAt = time.Now().Add(10 * time.Second)
+					room.PhaseEndsAt = time.Now().Add(15 * time.Second)
 
 					results := s.prepareResults(room)
 					s.broadcastRoom(room, map[string]any{
@@ -253,7 +253,7 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 					if room.Round >= maxRounds {
 						next = model.FinishedState
 					}
-					timer := time.AfterFunc(30*time.Second, func() {
+					timer := time.AfterFunc(15*time.Second, func() {
 						room.StateTransition <- next
 					})
 					room.Timers[next] = append(
