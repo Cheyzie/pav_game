@@ -136,7 +136,6 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 						timer.Stop()
 					}
 					room.Timers[model.LobbyState] = nil
-					s.resetPlayers(room)
 					room.Round += 1
 					room.PhaseEndsAt = time.Time{}
 					s.broadcastRoom(room, map[string]any{
@@ -249,6 +248,7 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 							"results": results,
 						},
 					})
+					s.resetPlayers(room)
 					next := model.LobbyState
 					if room.Round >= maxRounds {
 						next = model.FinishedState
@@ -311,31 +311,50 @@ func (s *GameService) scheduleClose(room *model.Room) {
 	})
 }
 
-func (s *GameService) Join(code string, player *model.Player) error {
+func (s *GameService) Join(code string, player *model.Player) (*model.Player, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	room, ok := s.rooms[code]
 	if !ok {
-		return ErrRoomNotExists
+		return nil, ErrRoomNotExists
 	}
 
 	for _, p := range room.Players {
-		if player.Nickname == p.Nickname {
-			return ErrNicknameTaken
+		if player.Nickname == p.Nickname && player.UserId != p.UserId {
+			return nil, ErrNicknameTaken
 		}
+	}
+
+	for _, p := range room.Players {
+		if player.UserId == p.UserId {
+			s.broadcastRoom(room, map[string]any{
+				"type": "player_renamed",
+				"payload": map[string]any{
+					"from": p.Nickname,
+					"to":   player.Nickname,
+				},
+			})
+			p.Nickname = player.Nickname
+			player = p
+			break
+		}
+	}
+
+	if player.Token != "" {
+		return player, nil
 	}
 
 	token, err := randString(charset, 16)
 	if err != nil {
 		log.Printf("generate token err: %s\n", err.Error())
-		return ErrTokenGenerate
+		return nil, ErrTokenGenerate
 	}
 
 	player.Token = token
 	player.JoinedRound = room.Round
 
 	room.Players = append(room.Players, player)
-	return nil
+	return player, nil
 }
 
 func (s *GameService) SendToPlayer(player *model.Player, payload any) {
@@ -641,7 +660,7 @@ func dispatchRestart(s *GameService, room *model.Room, player *model.Player, pay
 	for _, p := range room.Players {
 		p.Score = 0
 	}
-	room.Round = 1
+	room.Round = 0
 	room.UsedPromptIDs = room.UsedPromptIDs[:0]
 	next := model.LobbyState
 

@@ -28,7 +28,7 @@ func (h *Handler) createRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) join(w http.ResponseWriter, r *http.Request) {
-	_, err := getUserId(r)
+	userId, err := getUserId(r)
 	if err != nil {
 		newErrorResponse(w, http.StatusUnauthorized, "cant resolve user id", err)
 		return
@@ -41,8 +41,9 @@ func (h *Handler) join(w http.ResponseWriter, r *http.Request) {
 		newErrorResponse(w, http.StatusBadRequest, "Invalid input", err)
 		return
 	}
-	player := &model.Player{Nickname: input.Nickname}
-	if err := h.gameService.Join(code, player); err != nil {
+	player := &model.Player{Nickname: input.Nickname, UserId: userId}
+	player, err = h.gameService.Join(code, player)
+	if err != nil {
 		newErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), err)
 		return
 	}

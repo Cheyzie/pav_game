@@ -6,6 +6,7 @@ import (
 
 type Player struct {
 	ID          uuid.UUID
+	UserId      uint
 	IsReady     bool
 	Nickname    string
 	Token       string

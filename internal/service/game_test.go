@@ -123,6 +123,8 @@ const (
 	awaitTimeout = 2 * time.Second
 	quietWindow  = 250 * time.Millisecond
 	hostID       = uint(1)
+	// firstUserID keeps player account ids clear of hostID.
+	firstUserID = uint(100)
 )
 
 var defaultPrompt = model.Prompt{
@@ -136,6 +138,10 @@ type harness struct {
 	svc     *GameService
 	prompts *stubPromptRepo
 	room    *model.Room
+	// nextUserID hands every player a distinct account id. Join treats a
+	// matching UserId as the same person returning, so sharing one id (the
+	// zero value in particular) would fold the whole room into one player.
+	nextUserID uint
 }
 
 func newHarness(t *testing.T, prompts ...model.Prompt) *harness {
@@ -149,7 +155,7 @@ func newHarness(t *testing.T, prompts ...model.Prompt) *harness {
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
 	}
-	return &harness{t: t, svc: svc, prompts: repo, room: room}
+	return &harness{t: t, svc: svc, prompts: repo, room: room, nextUserID: firstUserID}
 }
 
 type testClient struct {
@@ -158,6 +164,7 @@ type testClient struct {
 	code     string
 	nickname string
 	token    string
+	userID   uint
 	bus      chan []byte
 }
 
@@ -173,8 +180,10 @@ func (h *harness) join(nickname string) *testClient {
 // how a player that never connects is represented.
 func (h *harness) joinOnly(nickname string) *testClient {
 	h.t.Helper()
-	p := &model.Player{Nickname: nickname}
-	if err := h.svc.Join(h.room.Code, p); err != nil {
+	h.nextUserID++
+	userID := h.nextUserID
+	joined, err := h.svc.Join(h.room.Code, &model.Player{Nickname: nickname, UserId: userID})
+	if err != nil {
 		h.t.Fatalf("Join(%s): %v", nickname, err)
 	}
 	return &testClient{
@@ -182,7 +191,8 @@ func (h *harness) joinOnly(nickname string) *testClient {
 		svc:      h.svc,
 		code:     h.room.Code,
 		nickname: nickname,
-		token:    p.Token,
+		token:    joined.Token,
+		userID:   userID,
 	}
 }
 
@@ -299,6 +309,12 @@ type resultsPayload struct {
 	Results []model.PlayerResult `json:"results"`
 }
 
+// game_over reports the settled standings, which are a different shape from a
+// round's results: a total and a placing, with no per-round delta.
+type finalResultsPayload struct {
+	FinalResults []model.FinalResult `json:"final_results"`
+}
+
 func decodePayload[T any](t *testing.T, f frame) T {
 	t.Helper()
 	var out T
@@ -318,6 +334,16 @@ func scoreOf(scores []model.PlayerResult, nickname string) (uint, bool) {
 		}
 	}
 	return 0, false
+}
+
+// finalResultOf returns a player's row from the game_over standings.
+func finalResultOf(results []model.FinalResult, nickname string) (model.FinalResult, bool) {
+	for _, r := range results {
+		if r.Nickname == nickname {
+			return r, true
+		}
+	}
+	return model.FinalResult{}, false
 }
 
 // resultOf returns the whole result row, for assertions that care about the
@@ -371,15 +397,15 @@ func TestJoin(t *testing.T) {
 	h := newHarness(t)
 
 	t.Run("unknown room", func(t *testing.T) {
-		err := h.svc.Join("nope", &model.Player{Nickname: "ghost"})
+		_, err := h.svc.Join("nope", &model.Player{Nickname: "ghost"})
 		if !errors.Is(err, ErrRoomNotExists) {
 			t.Errorf("got %v, want %v", err, ErrRoomNotExists)
 		}
 	})
 
 	t.Run("issues a token", func(t *testing.T) {
-		p := &model.Player{Nickname: "alice"}
-		if err := h.svc.Join(h.room.Code, p); err != nil {
+		p, err := h.svc.Join(h.room.Code, &model.Player{Nickname: "alice", UserId: firstUserID})
+		if err != nil {
 			t.Fatalf("Join: %v", err)
 		}
 		if len(p.Token) != 16 {
@@ -390,12 +416,86 @@ func TestJoin(t *testing.T) {
 		}
 	})
 
-	t.Run("nickname is taken even before connecting", func(t *testing.T) {
-		err := h.svc.Join(h.room.Code, &model.Player{Nickname: "alice"})
+	t.Run("another account cannot take the nickname, even before connecting", func(t *testing.T) {
+		_, err := h.svc.Join(h.room.Code, &model.Player{Nickname: "alice", UserId: firstUserID + 1})
 		if !errors.Is(err, ErrNicknameTaken) {
 			t.Errorf("got %v, want %v", err, ErrNicknameTaken)
 		}
 	})
+}
+
+// Join keys off the account id, not the nickname, so the same user arriving
+// twice keeps one seat and one token rather than being issued a second player.
+func TestJoinIsIdempotentPerAccount(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	alice := h.join("alice")
+	h.join("bob")
+	carol := h.joinOnly("carol") // connects at the end to read the roster
+
+	again, err := h.svc.Join(h.room.Code, &model.Player{Nickname: "alice", UserId: alice.userID})
+	if err != nil {
+		t.Fatalf("rejoin: %v", err)
+	}
+	if again.Token != alice.token {
+		t.Errorf("token = %q, want the original %q", again.Token, alice.token)
+	}
+
+	snap := carol.snapshot()
+	if len(snap.Players) != 3 {
+		t.Errorf("players = %+v, want 3 — the rejoin must not claim a second seat", snap.Players)
+	}
+}
+
+// A returning user may come back under a new nickname. The seat and token
+// follow them, and the room is told about the change.
+func TestJoinRenamesReturningUser(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	alice := h.join("alice")
+	bob := h.join("bob")
+
+	again, err := h.svc.Join(h.room.Code, &model.Player{Nickname: "alicia", UserId: alice.userID})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if again.Nickname != "alicia" {
+		t.Errorf("nickname = %q, want %q", again.Nickname, "alicia")
+	}
+	if again.Token != alice.token {
+		t.Errorf("token = %q, want the original %q", again.Token, alice.token)
+	}
+
+	f := bob.await("player_renamed")
+	if !f.payloadHas("alice") || !f.payloadHas("alicia") {
+		t.Errorf("payload %q should carry both the old and the new name", f.Payload)
+	}
+
+	// The room answers to the new nickname...
+	alice.nickname = "alicia"
+	if err := alice.send(dtos.SendMessageAction, "still me"); err != nil {
+		t.Fatalf("dispatch under the new nickname: %v", err)
+	}
+	bob.await("message_sent")
+
+	// ...and no longer to the old one.
+	err = h.svc.Dispatch(h.room.Code, "alice", dtos.Action{Type: dtos.ReadyAction})
+	if !errors.Is(err, ErrPlayerNotExists) {
+		t.Errorf("dispatch under the old nickname: got %v, want %v", err, ErrPlayerNotExists)
+	}
+}
+
+// Renaming into someone else's nickname is still a clash.
+func TestJoinRenameCannotStealANickname(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	alice := h.join("alice")
+	h.join("bob")
+
+	_, err := h.svc.Join(h.room.Code, &model.Player{Nickname: "bob", UserId: alice.userID})
+	if !errors.Is(err, ErrNicknameTaken) {
+		t.Errorf("got %v, want %v", err, ErrNicknameTaken)
+	}
 }
 
 func TestConnect(t *testing.T) {
@@ -418,7 +518,7 @@ func TestConnect(t *testing.T) {
 
 	t.Run("succeeds and announces", func(t *testing.T) {
 		alice.connect()
-		f := alice.await("user_connected")
+		f := alice.await("player_connected")
 		if got := decodePayload[nicknamePayload](t, f).Nickname; got != "alice" {
 			t.Errorf("nickname = %q, want %q", got, "alice")
 		}
@@ -438,13 +538,13 @@ func TestLeaveAllowsReconnect(t *testing.T) {
 	bob := h.join("bob")
 
 	h.svc.Leave(h.room.Code, alice.token)
-	f := bob.await("user_disconnected")
+	f := bob.await("player_disconnected")
 	if got := decodePayload[nicknamePayload](t, f).Nickname; got != "alice" {
 		t.Errorf("nickname = %q, want %q", got, "alice")
 	}
 
 	alice.connect() // same token, fresh bus
-	bob.await("user_connected")
+	bob.await("player_connected")
 }
 
 func TestDispatchUnknownRoomAndPlayer(t *testing.T) {
@@ -481,7 +581,7 @@ func TestSnapshotInLobby(t *testing.T) {
 	if err := alice.send(dtos.ReadyAction, ""); err != nil {
 		t.Fatalf("ready(alice): %v", err)
 	}
-	alice.await("user_ready")
+	alice.await("player_ready")
 
 	snap := bob.snapshot()
 
@@ -583,7 +683,7 @@ func TestSnapshotReflectsOwnProgress(t *testing.T) {
 
 	// Alice drops and comes back mid-vote.
 	h.svc.Leave(h.room.Code, alice.token)
-	bob.await("user_disconnected")
+	bob.await("player_disconnected")
 	snap := alice.snapshot()
 
 	if snap.State != model.VotingState {
@@ -647,8 +747,13 @@ func TestSnapshotCarriesScores(t *testing.T) {
 	}
 	alice.await("round_over")
 
+	// Stand in for the 15s result timer. Entering the lobby is what folds the
+	// round's delta into the carried total and opens the next round.
+	h.room.StateTransition <- model.LobbyState
+	alice.await("game_waiting")
+
 	h.svc.Leave(h.room.Code, alice.token)
-	bob.await("user_disconnected")
+	bob.await("player_disconnected")
 	snap := alice.snapshot()
 
 	a, ok := playerState(snap.Players, "alice")
@@ -681,7 +786,7 @@ func TestFullRoundLifecycle(t *testing.T) {
 	if err := alice.send(dtos.ReadyAction, ""); err != nil {
 		t.Fatalf("ready(alice): %v", err)
 	}
-	bob.await("user_ready")
+	bob.await("player_ready")
 	bob.awaitNone("game_started", quietWindow)
 
 	if err := bob.send(dtos.ReadyAction, ""); err != nil {
@@ -764,7 +869,7 @@ func TestDisconnectedPlayersDoNotBlockPhases(t *testing.T) {
 	// Carol registers and connects, then drops before the game starts.
 	carol := h.join("carol")
 	h.svc.Leave(h.room.Code, carol.token)
-	alice.await("user_disconnected")
+	alice.await("player_disconnected")
 
 	// Dave never opens a bus at all.
 	h.joinOnly("dave")
@@ -825,20 +930,20 @@ func fullGamePrompts() []model.Prompt {
 }
 
 // playToFinish runs a whole game and leaves the room in the finished state.
-func (h *harness) playToFinish(alice, bob *testClient) []model.PlayerResult {
+func (h *harness) playToFinish(alice, bob *testClient) []model.FinalResult {
 	h.t.Helper()
 	for round := 1; round <= maxRounds; round++ {
 		h.playRound(alice, bob)
 		if round < maxRounds {
-			// Stand in for the 10s result timer rather than sleeping through it.
+			// Stand in for the 15s result timer rather than sleeping through it.
 			// Entering the lobby cancels that pending timer, so it cannot fire late.
 			h.room.StateTransition <- model.LobbyState
 			alice.await("game_waiting")
 		}
 	}
-	// Stand in for the 10s timer the result phase armed with FinishedState.
+	// Stand in for the 15s timer the result phase armed with FinishedState.
 	h.room.StateTransition <- model.FinishedState
-	return decodePayload[resultsPayload](h.t, alice.await("game_over")).Results
+	return decodePayload[finalResultsPayload](h.t, alice.await("game_over")).FinalResults
 }
 
 func TestGameEndsAfterMaxRounds(t *testing.T) {
@@ -849,8 +954,26 @@ func TestGameEndsAfterMaxRounds(t *testing.T) {
 	carol := h.joinOnly("carol") // connects at the end to read the settled state
 
 	over := h.playToFinish(alice, bob)
-	if score, _ := scoreOf(over, "alice"); score != uint(maxRounds)*1500 {
-		t.Errorf("alice final score = %d, want %d", score, uint(maxRounds)*1500)
+	// Alice takes 1500 every round, so every round she played must be in the
+	// settled total — including the last one.
+	want := uint(maxRounds) * 1500
+	aliceFinal, ok := finalResultOf(over, "alice")
+	if !ok {
+		t.Fatalf("standings %+v missing alice", over)
+	}
+	if aliceFinal.Score != want {
+		t.Errorf("alice final score = %d, want %d (1500 for each of %d rounds)",
+			aliceFinal.Score, want, maxRounds)
+	}
+	if aliceFinal.Position != 1 {
+		t.Errorf("alice position = %d, want 1", aliceFinal.Position)
+	}
+	bobFinal, ok := finalResultOf(over, "bob")
+	if !ok {
+		t.Fatalf("standings %+v missing bob", over)
+	}
+	if bobFinal.Position != 2 {
+		t.Errorf("bob position = %d, want 2", bobFinal.Position)
 	}
 
 	// The room must report itself finished, or a restart can never be accepted.
@@ -909,7 +1032,7 @@ func TestRestartAfterFinish(t *testing.T) {
 	}
 	// Carol only ever observes; connected-but-not-ready would block the phase.
 	h.svc.Leave(h.room.Code, carol.token)
-	alice.await("user_disconnected")
+	alice.await("player_disconnected")
 
 	// The prompt pool was released, so a fresh game can be played out.
 	results := h.playRound(alice, bob)
@@ -1155,7 +1278,7 @@ func TestPromptFetchFailureReturnsToLobby(t *testing.T) {
 	if err := alice.send(dtos.ReadyAction, ""); err != nil {
 		t.Fatalf("ready(alice) after recovery: %v", err)
 	}
-	alice.await("user_ready")
+	alice.await("player_ready")
 }
 
 // awaitWithin is await with a caller-supplied deadline, for the one case that
@@ -1214,8 +1337,8 @@ func TestConcurrentActivity(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			p := &model.Player{Nickname: "drifter"}
-			if err := h.svc.Join(room.Code, p); err != nil {
+			p, err := h.svc.Join(room.Code, &model.Player{Nickname: "drifter", UserId: uint(200 + i)})
+			if err != nil {
 				continue
 			}
 			bus := make(chan []byte, busSize)
