@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/Cheyzie/pav_game/internal/dtos"
 	"github.com/Cheyzie/pav_game/internal/model"
+	"github.com/go-playground/validator/v10"
 )
 
 func (h *Handler) signIn(w http.ResponseWriter, r *http.Request) {
@@ -18,6 +20,16 @@ func (h *Handler) signIn(w http.ResponseWriter, r *http.Request) {
 		newErrorResponse(w, http.StatusUnauthorized, "Invalid input. Expected email and password", err)
 		return
 	}
+	if err := h.validator.Struct(input); err != nil {
+		var errs validator.ValidationErrors
+		if errors.As(err, &errs) {
+			newErrorResponse(w, http.StatusBadRequest, strings.Join(formatValidationErrors(errs), "|"), err)
+			return
+		}
+		newErrorResponse(w, http.StatusUnprocessableEntity, "invalid input", err)
+		return
+	}
+
 	ipAddress := strings.TrimRight(r.RemoteAddr, ":")
 
 	token, err := h.authService.GenerateToken(input.Email, input.Password, input.SessionName, ipAddress)
@@ -52,6 +64,15 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 		newErrorResponse(w, http.StatusUnauthorized, "Invalid input. Expected refresh_token", err)
 		return
 	}
+	if err := h.validator.Struct(input); err != nil {
+		var errs validator.ValidationErrors
+		if errors.As(err, &errs) {
+			newErrorResponse(w, http.StatusBadRequest, strings.Join(formatValidationErrors(errs), "|"), err)
+			return
+		}
+		newErrorResponse(w, http.StatusBadRequest, "Invalid input", err)
+		return
+	}
 	ipAddress := r.RemoteAddr
 
 	token, err := h.authService.RefreshToken(input.RefreshToken, ipAddress)
@@ -64,23 +85,35 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
-	var input model.User
+	var input dtos.SignupInput
 	decoder := json.NewDecoder(r.Body)
 	defer r.Body.Close()
 	if err := decoder.Decode(&input); err != nil {
 		newErrorResponse(w, http.StatusUnprocessableEntity, "Invalid input. Expected username, email and password", err)
 		return
 	}
-
-	id, err := h.authService.CreateUser(input)
+	if err := h.validator.Struct(input); err != nil {
+		var errs validator.ValidationErrors
+		if errors.As(err, &errs) {
+			newErrorResponse(w, http.StatusBadRequest, strings.Join(formatValidationErrors(errs), "|"), err)
+			return
+		}
+		newErrorResponse(w, http.StatusUnprocessableEntity, "invalid input", err)
+		return
+	}
+	user := model.User{
+		Username: input.Username,
+		Email:    input.Email,
+		Password: input.Password,
+	}
+	id, err := h.authService.CreateUser(user)
 	if err != nil {
 		newErrorResponse(w, http.StatusBadRequest, "Invalid data", err)
 		return
 	}
+	user.ID = id
 
-	newResponse(w, http.StatusCreated, map[string]any{
-		"id": id,
-	})
+	newResponse(w, http.StatusCreated, user)
 }
 
 func (h *Handler) getMe(w http.ResponseWriter, r *http.Request) {

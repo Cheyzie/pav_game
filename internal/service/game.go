@@ -27,11 +27,9 @@ var (
 	ErrRoomNotExists    error = errors.New("room not exists")
 	ErrPlayerNotExists  error = errors.New("player not exists")
 	ErrNicknameTaken    error = errors.New("nickname has been already taken")
+	ErrGetPromptsCount  error = errors.New("get prompts count error")
+	ErrNotEnoughPrompts error = errors.New("prompts not enough for game")
 )
-
-type GameRepository interface {
-	Store(room *model.Game) error
-}
 
 type ActionDispatcher func(
 	s *GameService,
@@ -40,25 +38,18 @@ type ActionDispatcher func(
 	payload *string,
 ) (*model.GameState, error)
 
-type PromptRepository interface {
-	Store(room *model.Prompt) error
-	GetRand(usedID []uint) (model.Prompt, error)
-}
-
 type GameService struct {
 	rooms       map[string]*model.Room
 	userRooms   map[uint]*model.Room
-	gameRepo    GameRepository
 	promptRepo  PromptRepository
 	dispatchers map[dtos.ActionType]ActionDispatcher
 	mu          sync.Mutex
 }
 
-func NewGameService(gameRepo GameRepository, promptRepo PromptRepository) *GameService {
+func NewGameService(promptRepo PromptRepository) *GameService {
 	return &GameService{
 		rooms:      make(map[string]*model.Room),
 		userRooms:  make(map[uint]*model.Room),
-		gameRepo:   gameRepo,
 		promptRepo: promptRepo,
 		dispatchers: map[dtos.ActionType]ActionDispatcher{
 			dtos.SendMessageAction: dispatchMessage,
@@ -71,11 +62,19 @@ func NewGameService(gameRepo GameRepository, promptRepo PromptRepository) *GameS
 	}
 }
 
-func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
+func (s *GameService) CreateRoom(promptsWrittenIn string, userID uint) (*model.Room, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if room, ok := s.userRooms[userID]; ok {
 		return room, nil
+	}
+	count, err := s.promptRepo.CountByWrittenIn(promptsWrittenIn)
+	if err != nil {
+		log.Printf("get prompts count err: %s\n", err.Error())
+		return nil, ErrGetPromptsCount
+	}
+	if count < maxRounds*2 {
+		return nil, ErrNotEnoughPrompts
 	}
 	code, err := s.generateCode()
 	if err != nil {
@@ -86,15 +85,16 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 	messagesChan := make(chan []byte, 25)
 
 	room := &model.Room{
-		Code:            code,
-		HostID:          userID,
-		Round:           1,
-		State:           model.LobbyState,
-		UsedPromptIDs:   make([]uint, 0),
-		Timers:          map[model.GameState][]*time.Timer{},
-		StateTransition: statesChan,
-		Messages:        messagesChan,
-		Done:            make(chan struct{}),
+		Code:             code,
+		PromptsWrittenIn: promptsWrittenIn,
+		HostID:           userID,
+		Round:            1,
+		State:            model.LobbyState,
+		UsedPromptIDs:    make([]uint, 0),
+		Timers:           map[model.GameState][]*time.Timer{},
+		StateTransition:  statesChan,
+		Messages:         messagesChan,
+		Done:             make(chan struct{}),
 	}
 	go func() {
 		for {
@@ -137,6 +137,7 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 					}
 					room.Timers[model.LobbyState] = nil
 					room.Round += 1
+					room.Prompt = nil
 					room.PhaseEndsAt = time.Time{}
 					s.broadcastRoom(room, map[string]any{
 						"type": "game_waiting",
@@ -149,7 +150,7 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 						continue
 					}
 					s.mu.Unlock()
-					prompt, err := s.promptRepo.GetRand(room.UsedPromptIDs)
+					prompt, err := s.promptRepo.GetRand(room.PromptsWrittenIn, room.UsedPromptIDs)
 					if err != nil {
 						log.Printf("get prompt err: %s\n", err.Error())
 						s.mu.Lock()
@@ -164,16 +165,16 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 					room.UsedPromptIDs = append(room.UsedPromptIDs, prompt.ID)
 					s.mu.Lock()
 					room.State = model.LieState
-					room.Prompt = &prompt.Situation
-					truth := strings.ToLower(strings.TrimSpace(prompt.Truth))
-					room.Truth = &truth
+					room.Prompt = &prompt
+					room.Prompt.Truth = strings.ToLower(room.Prompt.Truth)
 					room.Answers = nil
 					room.PhaseEndsAt = time.Now().Add(60 * time.Second)
 					s.mu.Unlock()
 					s.broadcastRoom(room, map[string]any{
 						"type": "game_started",
 						"payload": map[string]any{
-							"prompt": room.Prompt,
+							"prompt_id": room.Prompt.ID,
+							"prompt":    room.Prompt.Question,
 						},
 					})
 					timer := time.AfterFunc(60*time.Second, func() {
@@ -197,8 +198,8 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 					}
 					room.Timers[model.VotingState] = nil
 					answers := make([]string, 0, len(room.Players)+1)
-					if room.Truth != nil {
-						answers = append(answers, *room.Truth)
+					if room.Prompt != nil {
+						answers = append(answers, room.Prompt.Truth)
 					}
 					for _, p := range room.Players {
 						if p.Answer != nil {
@@ -244,7 +245,7 @@ func (s *GameService) CreateRoom(userID uint) (*model.Room, error) {
 					s.broadcastRoom(room, map[string]any{
 						"type": "round_over",
 						"payload": map[string]any{
-							"truth":   room.Truth,
+							"truth":   room.Prompt.Truth,
 							"results": results,
 						},
 					})
@@ -382,6 +383,7 @@ func (s *GameService) roomSnapshot(room *model.Room, viewer *model.Player) map[s
 	players := make([]model.PlayerState, 0, len(room.Players))
 	for _, p := range room.Players {
 		players = append(players, model.PlayerState{
+			UserID:    p.UserId,
 			Nickname:  p.Nickname,
 			Score:     p.Score,
 			ScoreDiff: p.ScoreDiff,
@@ -409,15 +411,18 @@ func (s *GameService) roomSnapshot(room *model.Room, viewer *model.Player) map[s
 		payload["vote"] = *viewer.Vote
 	}
 	// The situation is public from the moment the round starts.
-	if room.Prompt != nil && (room.State == model.LieState || room.State == model.VotingState) {
-		payload["prompt"] = *room.Prompt
+	if room.Prompt != nil {
+		payload["prompt_id"] = room.Prompt.ID
+		payload["prompt"] = room.Prompt.Question
 	}
 	// Candidates are public only once voting opens.
 	if room.State == model.VotingState && room.Answers != nil {
 		payload["answers"] = room.Answers
 	}
 	if room.State == model.ResultState {
-		payload["truth"] = room.Truth
+		if room.Prompt != nil {
+			payload["truth"] = room.Prompt.Truth
+		}
 		payload["results"] = s.prepareResults(room)
 	}
 	if room.State == model.FinishedState {
@@ -510,6 +515,7 @@ func (s *GameService) Connect(code string, token string, bus chan<- []byte) (*mo
 	s.broadcastRoom(room, map[string]any{
 		"type": "player_connected",
 		"payload": model.PlayerState{
+			UserID:    player.UserId,
 			Nickname:  player.Nickname,
 			Score:     player.Score,
 			IsReady:   player.IsReady,
@@ -656,14 +662,15 @@ func dispatchRestart(s *GameService, room *model.Room, player *model.Player, pay
 		return nil, nil
 	}
 	room.Prompt = nil
-	room.Truth = nil
 	for _, p := range room.Players {
 		p.Score = 0
 	}
 	room.Round = 0
 	room.UsedPromptIDs = room.UsedPromptIDs[:0]
 	next := model.LobbyState
-
+	s.broadcastRoom(room, map[string]any{
+		"type": "game_restarted",
+	})
 	return &next, nil
 }
 
@@ -685,7 +692,7 @@ func dispatchLie(s *GameService, room *model.Room, player *model.Player, payload
 		s.SendToPlayer(player, ErrFrame("you already answered"))
 		return nil, nil
 	}
-	if room.Truth != nil && answer == *room.Truth {
+	if room.Prompt != nil && answer == room.Prompt.Truth {
 		s.SendToPlayer(player, ErrFrame("that answer is already taken"))
 		return nil, nil
 	}
@@ -740,7 +747,7 @@ func dispatchVote(s *GameService, room *model.Room, player *model.Player, payloa
 	}
 	player.Vote = &vote
 
-	if room.Truth != nil && vote == *room.Truth {
+	if room.Prompt != nil && vote == room.Prompt.Truth {
 		player.ScoreDiff += 1000
 	} else {
 		for _, p := range room.Players {

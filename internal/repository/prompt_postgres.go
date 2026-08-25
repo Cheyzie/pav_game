@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/Cheyzie/pav_game/internal/model"
@@ -8,7 +9,7 @@ import (
 	"github.com/lib/pq"
 )
 
-const promptColumns = "id, situation, truth, category, is_fallback, times_used, created_at, updated_at"
+const promptColumns = "id, user_id, written_in, question, truth, category, times_used, guessed_correctly, blocked_at, created_at, updated_at"
 
 type PromptPostgres struct {
 	db *sqlx.DB
@@ -19,10 +20,10 @@ func NewPromptPostgres(db *sqlx.DB) *PromptPostgres {
 }
 
 func (r *PromptPostgres) Store(prompt *model.Prompt) error {
-	query := fmt.Sprintf(`INSERT INTO %s (situation, truth, category, is_fallback)
-		VALUES ($1, $2, $3, $4) RETURNING id, created_at, updated_at;`, promptsTable)
+	query := fmt.Sprintf(`INSERT INTO %s (user_id, written_in, question, truth, category )
+		VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at, updated_at;`, promptsTable)
 
-	row := r.db.QueryRow(query, prompt.Situation, prompt.Truth, prompt.Category, prompt.IsFallback)
+	row := r.db.QueryRow(query, prompt.UserID, prompt.WrittenIn, prompt.Question, prompt.Truth, prompt.Category)
 
 	if err := row.Scan(&prompt.ID, &prompt.CreatedAt, &prompt.UpdatedAt); err != nil {
 		return err
@@ -32,14 +33,44 @@ func (r *PromptPostgres) Store(prompt *model.Prompt) error {
 }
 
 // GetRand picks a prompt the room has not seen yet.
-func (r *PromptPostgres) GetRand(usedID []uint) (model.Prompt, error) {
+func (r *PromptPostgres) GetRand(writtenIn string, usedID []uint) (model.Prompt, error) {
 	var prompt model.Prompt
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE id != ALL($1) ORDER BY random() LIMIT 1;",
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE blocked_at IS NULL AND written_in=$1 AND id != ALL($2) ORDER BY random() LIMIT 1;",
 		promptColumns, promptsTable)
 
-	err := r.db.Get(&prompt, query, pq.Array(usedID))
+	err := r.db.Get(&prompt, query, writtenIn, pq.Array(usedID))
 
 	return prompt, err
+}
+
+func (r *PromptPostgres) CountByWrittenIn(writtenIn string) (uint, error) {
+	var count uint
+	query := fmt.Sprintf("SELECT count(*) FROM %s WHERE blocked_at IS NULL AND written_in=$1;",
+		promptsTable)
+
+	err := r.db.Get(&count, query, writtenIn)
+
+	return count, err
+}
+
+func (r *PromptPostgres) CountByUser(userID uint) (uint, error) {
+	var count uint
+	query := fmt.Sprintf("SELECT count(*) FROM %s WHERE user_id = $1;",
+		promptsTable)
+
+	err := r.db.Get(&count, query, userID)
+
+	return count, err
+}
+
+func (r *PromptPostgres) GetCategories(writtenIn string) ([]model.Category, error) {
+	categories := make([]model.Category, 0)
+	query := fmt.Sprintf("SELECT category, count(*) as prompts_count FROM %s WHERE written_in = $1 GROUP BY category ORDER BY count(*) DESC;",
+		promptsTable)
+
+	err := r.db.Select(&categories, query, writtenIn)
+
+	return categories, err
 }
 
 func (r *PromptPostgres) GetByID(id uint) (model.Prompt, error) {
@@ -50,8 +81,6 @@ func (r *PromptPostgres) GetByID(id uint) (model.Prompt, error) {
 	return prompt, err
 }
 
-// List pages through prompts, optionally narrowed to one category. An empty
-// category returns every prompt.
 func (r *PromptPostgres) List(category string, limit, offset int) ([]model.Prompt, error) {
 	prompts := make([]model.Prompt, 0)
 	query := fmt.Sprintf(`SELECT %s FROM %s WHERE ($1 = '' OR category = $1)
@@ -64,13 +93,11 @@ func (r *PromptPostgres) List(category string, limit, offset int) ([]model.Promp
 	return prompts, nil
 }
 
-// IncrementTimesUsed bumps the usage counter after a prompt has been played.
-// Nothing writes times_used otherwise.
-func (r *PromptPostgres) IncrementTimesUsed(id uint) error {
-	query := fmt.Sprintf("UPDATE %s SET times_used = times_used + 1, updated_at = NOW() WHERE id = $1;",
+func (r *PromptPostgres) IncrementTimesUsed(ctx context.Context, id uint, guessedCorrectly uint) error {
+	query := fmt.Sprintf("UPDATE %s SET times_used = times_used + 1, guessed_correctly = guessed_correctly + $1, updated_at = NOW() WHERE id = $2;",
 		promptsTable)
 
-	res, err := r.db.Exec(query, id)
+	res, err := r.db.ExecContext(ctx, query, guessedCorrectly, id)
 	if err != nil {
 		return err
 	}
@@ -79,10 +106,10 @@ func (r *PromptPostgres) IncrementTimesUsed(id uint) error {
 }
 
 func (r *PromptPostgres) Update(prompt *model.Prompt) error {
-	query := fmt.Sprintf(`UPDATE %s SET situation = $2, truth = $3, category = $4, is_fallback = $5,
+	query := fmt.Sprintf(`UPDATE %s SET question = $2, truth = $3, category = $4, written_in = $5,
 		updated_at = NOW() WHERE id = $1 RETURNING updated_at;`, promptsTable)
 
-	row := r.db.QueryRow(query, prompt.ID, prompt.Situation, prompt.Truth, prompt.Category, prompt.IsFallback)
+	row := r.db.QueryRow(query, prompt.ID, prompt.Question, prompt.Truth, prompt.Category, prompt.WrittenIn)
 
 	return row.Scan(&prompt.UpdatedAt)
 }

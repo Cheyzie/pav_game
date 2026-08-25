@@ -17,19 +17,19 @@ const (
 )
 
 type Room struct {
-	Id              uint
-	HostID          uint
-	Code            string
-	Done            chan struct{}
-	UsedPromptIDs   []uint
-	State           GameState
-	StateTransition chan GameState
-	Messages        chan []byte
-	MessageLog      []dtos.Message
-	Timers          map[GameState][]*time.Timer
-	Round           uint
-	Prompt          *string
-	Truth           *string
+	Id               uint
+	HostID           uint
+	PromptsWrittenIn string
+	Code             string
+	Done             chan struct{}
+	UsedPromptIDs    []uint
+	State            GameState
+	StateTransition  chan GameState
+	Messages         chan []byte
+	MessageLog       []dtos.Message
+	Timers           map[GameState][]*time.Timer
+	Round            uint
+	Prompt           *Prompt
 	// Answers holds the shuffled candidates published when voting opens, so a
 	// client connecting mid-phase is shown the same list as everyone else.
 	Answers []string

@@ -2,18 +2,22 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/Cheyzie/pav_game/internal/model"
 	"github.com/Cheyzie/pav_game/internal/service"
+	"github.com/go-playground/validator/v10"
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
 )
 
 type Handler struct {
-	authService *service.AuthorizationService
-	gameService *service.GameService
-	upgrader    websocket.Upgrader
+	authService   *service.AuthorizationService
+	gameService   *service.GameService
+	promptService *service.PromptService
+	validator     *validator.Validate
+	upgrader      websocket.Upgrader
 }
 
 func (h *Handler) options(w http.ResponseWriter, r *http.Request) {
@@ -36,10 +40,12 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-func NewHandler(authService *service.AuthorizationService, gameService *service.GameService) *Handler {
+func NewHandler(authService *service.AuthorizationService, gameService *service.GameService, promptService *service.PromptService) *Handler {
 	return &Handler{
-		authService: authService,
-		gameService: gameService,
+		authService:   authService,
+		gameService:   gameService,
+		promptService: promptService,
+		validator:     validator.New(validator.WithRequiredStructEnabled()),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Пропускаем любой запрос
@@ -77,6 +83,13 @@ func (h *Handler) InitRoutes() *http.ServeMux {
 		mux.HandleFunc("POST /api/v1/rooms/{code}/join", corsMiddleware(h.userIdentityMiddleware(h.join)))
 		mux.HandleFunc("OPTIONS /api/v1/rooms/connect", h.options)
 		mux.HandleFunc("GET /api/v1/rooms/connect", corsMiddleware(h.connect))
+
+		mux.HandleFunc("OPTIONS /api/v1/prompts", h.options)
+		mux.HandleFunc("POST /api/v1/prompts", corsMiddleware(h.userIdentityMiddleware(h.createPrompt)))
+		mux.HandleFunc("OPTIONS /api/v1/prompts/categories", h.options)
+		mux.HandleFunc("GET /api/v1/prompts/categories", corsMiddleware(h.userIdentityMiddleware(h.listCategories)))
+		mux.HandleFunc("OPTIONS /api/v1/me/prompts-count", h.options)
+		mux.HandleFunc("GET /api/v1/me/prompts-count", corsMiddleware(h.userIdentityMiddleware(h.promptsCountByUser)))
 	}
 
 	return mux
@@ -99,4 +112,12 @@ func newResponse(w http.ResponseWriter, statusCode int, body any) {
 	if err := encoder.Encode(body); err != nil {
 		logrus.Error(err.Error())
 	}
+}
+
+func formatValidationErrors(errs validator.ValidationErrors) []string {
+	errStrings := make([]string, 0, len(errs))
+	for i := range errs {
+		errStrings = append(errStrings, fmt.Sprintf("Field %s: wanted %s %s", errs[i].Field(), errs[i].Tag(), errs[i].Param()))
+	}
+	return errStrings
 }

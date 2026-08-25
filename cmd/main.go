@@ -47,10 +47,10 @@ func main() {
 	authRepo := repository.NewUserPostgres(db)
 	rtRepo := repository.NewRefreshTokenPostgres(db)
 	authService := service.NewAuthorizationService(authRepo, rtRepo)
-	gameRepo := repository.NewGamePostgres(db)
 	promptRepo := repository.NewPromptPostgres(db)
-	gameService := service.NewGameService(gameRepo, promptRepo)
-	handler := handlers.NewHandler(authService, gameService)
+	gameService := service.NewGameService(promptRepo)
+	promptService := service.NewPromptService(promptRepo)
+	handler := handlers.NewHandler(authService, gameService, promptService)
 	router := handler.InitRoutes()
 
 	srv := server.NewServer("8080", router)

@@ -19,10 +19,6 @@ import (
 // stubs
 // ---------------------------------------------------------------------------
 
-type stubGameRepo struct{}
-
-func (stubGameRepo) Store(*model.Game) error { return nil }
-
 type stubPromptRepo struct {
 	mu      sync.Mutex
 	prompts []model.Prompt
@@ -32,7 +28,13 @@ type stubPromptRepo struct {
 
 func (r *stubPromptRepo) Store(*model.Prompt) error { return nil }
 
-func (r *stubPromptRepo) GetRand(used []uint) (model.Prompt, error) {
+func (r *stubPromptRepo) GetCategories(string) ([]model.Category, error) { return nil, nil }
+
+func (r *stubPromptRepo) CountByUser(uint) (uint, error) { return 0, nil }
+
+func (r *stubPromptRepo) CountByWrittenIn(writtenIn string) (uint, error) { return 16, nil }
+
+func (r *stubPromptRepo) GetRand(writtenIn string, used []uint) (model.Prompt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
@@ -128,9 +130,9 @@ const (
 )
 
 var defaultPrompt = model.Prompt{
-	ID:        1,
-	Situation: "why is the sky blue?",
-	Truth:     "Rayleigh Scattering", // deliberately mixed case
+	ID:       1,
+	Question: "why is the sky blue?",
+	Truth:    "Rayleigh Scattering", // deliberately mixed case
 }
 
 type harness struct {
@@ -150,8 +152,8 @@ func newHarness(t *testing.T, prompts ...model.Prompt) *harness {
 		prompts = []model.Prompt{defaultPrompt}
 	}
 	repo := &stubPromptRepo{prompts: prompts}
-	svc := NewGameService(stubGameRepo{}, repo)
-	room, err := svc.CreateRoom(hostID)
+	svc := NewGameService(repo)
+	room, err := svc.CreateRoom("", hostID)
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
 	}
@@ -363,13 +365,13 @@ func resultOf(scores []model.PlayerResult, nickname string) (model.PlayerResult,
 
 func TestCreateRoomIsIdempotentPerHost(t *testing.T) {
 	t.Parallel()
-	svc := NewGameService(stubGameRepo{}, &stubPromptRepo{prompts: []model.Prompt{defaultPrompt}})
+	svc := NewGameService(&stubPromptRepo{prompts: []model.Prompt{defaultPrompt}})
 
-	first, err := svc.CreateRoom(7)
+	first, err := svc.CreateRoom("", 7)
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
 	}
-	again, err := svc.CreateRoom(7)
+	again, err := svc.CreateRoom("", 7)
 	if err != nil {
 		t.Fatalf("CreateRoom (repeat): %v", err)
 	}
@@ -377,7 +379,7 @@ func TestCreateRoomIsIdempotentPerHost(t *testing.T) {
 		t.Errorf("same host got two rooms: %q then %q", first.Code, again.Code)
 	}
 
-	other, err := svc.CreateRoom(8)
+	other, err := svc.CreateRoom("", 8)
 	if err != nil {
 		t.Fatalf("CreateRoom (other host): %v", err)
 	}
@@ -654,8 +656,8 @@ func TestSnapshotDuringPromptPhase(t *testing.T) {
 	if snap.State != model.LieState {
 		t.Errorf("state = %q, want %q", snap.State, model.LieState)
 	}
-	if snap.Prompt == nil || *snap.Prompt != defaultPrompt.Situation {
-		t.Errorf("prompt = %v, want %q", snap.Prompt, defaultPrompt.Situation)
+	if snap.Prompt == nil || *snap.Prompt != defaultPrompt.Question {
+		t.Errorf("prompt = %v, want %q", snap.Prompt, defaultPrompt.Question)
 	}
 	// Alice has answered but nothing is public until voting opens.
 	if snap.Answers != nil {
@@ -794,7 +796,7 @@ func TestFullRoundLifecycle(t *testing.T) {
 	}
 	started := alice.await("game_started")
 	bob.await("game_started")
-	if !started.payloadHas(defaultPrompt.Situation) {
+	if !started.payloadHas(defaultPrompt.Question) {
 		t.Errorf("game_started payload %q does not carry the situation", started.Payload)
 	}
 
@@ -921,9 +923,9 @@ func fullGamePrompts() []model.Prompt {
 	prompts := make([]model.Prompt, 0, maxRounds)
 	for i := range maxRounds {
 		prompts = append(prompts, model.Prompt{
-			ID:        uint(i + 1),
-			Situation: defaultPrompt.Situation,
-			Truth:     defaultPrompt.Truth,
+			ID:       uint(i + 1),
+			Question: defaultPrompt.Question,
+			Truth:    defaultPrompt.Truth,
 		})
 	}
 	return prompts
@@ -1333,7 +1335,7 @@ func TestConcurrentActivity(t *testing.T) {
 	// Churn the room maps at the same time.
 	wg.Go(func() {
 		for i := range 20 {
-			room, err := h.svc.CreateRoom(uint(100 + i))
+			room, err := h.svc.CreateRoom("", uint(100+i))
 			if err != nil {
 				continue
 			}
@@ -1367,7 +1369,7 @@ func TestConcurrentActivity(t *testing.T) {
 	close(stop)
 
 	// The service is still responsive afterwards.
-	if _, err := h.svc.CreateRoom(999); err != nil {
+	if _, err := h.svc.CreateRoom("", 999); err != nil {
 		t.Fatalf("service unusable after concurrent load: %v", err)
 	}
 }

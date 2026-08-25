@@ -1,41 +1,14 @@
 CREATE TABLE IF NOT EXISTS prompts
 (
     id SERIAL PRIMARY KEY,
-    situation VARCHAR(1024) NOT NULL,
+    user_id INT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    written_in VARCHAR(255) NOT NULL,
+    question VARCHAR(1024) NOT NULL,
     truth VARCHAR(255) NOT NULL,
     category VARCHAR(255) NOT NULL,
-    is_fallback BOOL NOT NULL,
     times_used INT NOT NULL DEFAULT 0,
+    guessed_correctly INT NOT NULL DEFAULT 0,
+    blocked_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS games
-(
-    id SERIAL PRIMARY KEY,
-    room_code VARCHAR(4) NOT NULL,
-    final_scores JSONB NOT NULL,
-    started_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    ended_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS rounds
-(
-    id SERIAL PRIMARY KEY,
-    game_id INT UNIQUE NOT NULL REFERENCES games (id) ON DELETE CASCADE,
-    prompt_id INT UNIQUE NOT NULL REFERENCES prompts (id) ON DELETE CASCADE,
-    truth_finders INT NOT NULL DEFAULT 0,
-    total_guessers INT NOT NULL DEFAULT 0,
-    players_present INT NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS submissions
-(
-    id SERIAL PRIMARY KEY,
-    game_id INT UNIQUE NOT NULL REFERENCES games (id) ON DELETE CASCADE,
-    round_id INT UNIQUE NOT NULL REFERENCES rounds (id) ON DELETE CASCADE,
-    player_id UUID NOT NULL,
-    text VARCHAR(255) NOT NULL,
-    nickname VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );

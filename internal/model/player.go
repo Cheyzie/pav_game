@@ -35,6 +35,7 @@ type FinalResult struct {
 
 // PlayerState is the per-player view sent in a room snapshot.
 type PlayerState struct {
+	UserID    uint   `json:"user_id"`
 	Nickname  string `json:"nickname"`
 	Score     uint   `json:"score"`
 	ScoreDiff uint   `json:"score_diff"`

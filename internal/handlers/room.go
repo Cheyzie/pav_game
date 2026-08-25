@@ -2,25 +2,46 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/Cheyzie/pav_game/internal/dtos"
 	"github.com/Cheyzie/pav_game/internal/model"
 	"github.com/Cheyzie/pav_game/internal/service"
+	"github.com/go-playground/validator/v10"
 	"github.com/gorilla/websocket"
 )
 
 func (h *Handler) createRoom(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserId(r)
-
 	if err != nil {
 		newErrorResponse(w, http.StatusUnauthorized, "cant resolve user id", err)
 		return
 	}
-	room, err := h.gameService.CreateRoom(userID)
+
+	var input dtos.CreateRoomInput
+	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
+	if err := decoder.Decode(&input); err != nil {
+		newErrorResponse(w, http.StatusBadRequest, "Invalid input", err)
+		return
+	}
+
+	if err := h.validator.Struct(input); err != nil {
+		var errs validator.ValidationErrors
+		if errors.As(err, &errs) {
+			newErrorResponse(w, http.StatusBadRequest, strings.Join(formatValidationErrors(errs), "|"), err)
+			return
+		}
+		newErrorResponse(w, http.StatusBadRequest, "Invalid input", err)
+		return
+	}
+
+	room, err := h.gameService.CreateRoom(input.PromptsWrittenIn, userID)
 
 	if err != nil {
-		newErrorResponse(w, http.StatusUnprocessableEntity, "create room error", err)
+		newErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), err)
 		return
 	}
 
